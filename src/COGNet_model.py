@@ -15,6 +15,7 @@ class COGNet(nn.Module):
     """在CopyDrug_batch基础上将medication的encode部分修改为transformer encoder"""
     def __init__(self, voc_size, ehr_adj, ddi_adj, ddi_mask_H, emb_dim=64, device=torch.device('cpu:0')):
         super(COGNet, self).__init__()
+        self.name = 'COGNet'
         self.voc_size = voc_size
         self.emb_dim = emb_dim
         self.device = device

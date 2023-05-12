@@ -19,18 +19,20 @@ from torch.utils.data.dataloader import DataLoader
 from data_loader import mimic_data, pad_batch_v2_train, pad_batch_v2_eval, pad_num_replace
 
 import sys
+
 sys.path.append("..")
 from COGNet_ablation import COGNet_wo_copy, COGNet_wo_visit_score, COGNet_wo_graph, COGNet_wo_diag, COGNet_wo_proc
 from COGNet_model import COGNet, policy_network
-from util import llprint, sequence_metric, sequence_output_process, ddi_rate_score, get_n_params, output_flatten, print_result
+from util import llprint, sequence_metric, sequence_output_process, ddi_rate_score, get_n_params, output_flatten, \
+    print_result
 from recommend import eval, test
 
 torch.manual_seed(1203)
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2"
 
 model_name = 'COGNet'
-resume_path = ''
+resume_path = './saved/COGNet/Epoch_44_JA_0.5197_DDI_0.08053.model'
 
 if not os.path.exists(os.path.join("saved", model_name)):
     os.makedirs(os.path.join("saved", model_name))
@@ -41,7 +43,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--Test', action='store_true', default=False, help="test mode")
 parser.add_argument('--model_name', type=str, default=model_name, help="model name")
 parser.add_argument('--resume_path', type=str, default=resume_path, help='resume path')
-parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
 parser.add_argument('--batch_size', type=int, default=16, help='batch_size')
 parser.add_argument('--emb_dim', type=int, default=64, help='embedding dimension size')
 parser.add_argument('--max_len', type=int, default=45, help='maximum prediction medication sequence')
@@ -58,7 +60,7 @@ def main(args):
     ehr_adj_path = '../data/ehr_adj_final.pkl'
     ddi_adj_path = '../data/ddi_A_final.pkl'
     ddi_mask_path = '../data/ddi_mask_H.pkl'
-    device = torch.device('cuda')
+    device = torch.device('cuda:0')
 
     data = dill.load(open(data_path, 'rb'))
     voc = dill.load(open(voc_path, 'rb'))
@@ -77,11 +79,11 @@ def main(args):
         for adm in patient:
             for med in adm[2]:
                 med_count[med] += 1
-    
+
     ## rare first
     for i in range(len(data)):
         for j in range(len(data[i])):
-            cur_medications = sorted(data[i][j][2], key=lambda x:med_count[x])
+            cur_medications = sorted(data[i][j][2], key=lambda x: med_count[x])
             data[i][j][2] = cur_medications
 
 
@@ -152,18 +154,19 @@ def main(args):
     history = defaultdict(list)
     best_epoch, best_ja = 0, 0
 
-    EPOCH = 200
+    EPOCH = 50
     for epoch in range(EPOCH):
         tic = time.time()
-        print ('\nepoch {} --------------------------'.format(epoch))
+        print('\nepoch {} --------------------------'.format(epoch))
 
         model.train()
+        pred_loss_lst = []
         for idx, data in enumerate(train_dataloader):
             diseases, procedures, medications, seq_length, \
             d_length_matrix, p_length_matrix, m_length_matrix, \
-                d_mask_matrix, p_mask_matrix, m_mask_matrix, \
-                    dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, \
-                        dec_proc, stay_proc, dec_proc_mask, stay_proc_mask = data
+            d_mask_matrix, p_mask_matrix, m_mask_matrix, \
+            dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, \
+            dec_proc, stay_proc, dec_proc_mask, stay_proc_mask = data
 
             diseases = pad_num_replace(diseases, -1, DIAG_PAD_TOKEN).to(device)
             procedures = pad_num_replace(procedures, -1, PROC_PAD_TOKEN).to(device)
@@ -183,12 +186,18 @@ def main(args):
                 dec_proc, stay_proc, dec_proc_mask, stay_proc_mask)
             labels, predictions = output_flatten(medications, output_logits, seq_length, m_length_matrix, voc_size[2] + 2, END_TOKEN, device, max_len=args.max_len)
             loss = F.nll_loss(predictions, labels.long())
+            pred_loss = loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            pred_loss_lst.append(pred_loss.item())
+
             llprint('\rtraining step: {} / {}'.format(idx, len(train_dataloader)))
 
-        print ()
+        print(
+            f'\nPred Loss: {np.mean(pred_loss_lst):.4f}')
+
         tic2 = time.time()
         ddi_rate, ja, prauc, avg_p, avg_r, avg_f1, avg_med = eval(model, eval_dataloader, voc_size, epoch, device, TOKENS, args)
         print ('training time: {}, test time: {}'.format(time.time() - tic, time.time() - tic2))
@@ -200,15 +209,17 @@ def main(args):
         history['avg_f1'].append(avg_f1)
         history['prauc'].append(prauc)
         history['med'].append(avg_med)
+        history['train_loss'].append(np.mean(pred_loss_lst))
 
         if epoch >= 5:
-            print ('ddi: {}, Med: {}, Ja: {}, F1: {}'.format(
+            print('ddi: {}, Med: {}, Ja: {}, F1: {}'.format(
                 np.mean(history['ddi_rate'][-5:]),
                 np.mean(history['med'][-5:]),
                 np.mean(history['ja'][-5:]),
                 np.mean(history['avg_f1'][-5:]),
-                np.mean(history['prauc'][-5:])
-                ))
+                np.mean(history['prauc'][-5:]),
+                np.mean(history['train_loss'][-5:])
+            ))
 
         torch.save(model.state_dict(), open(os.path.join('saved', args.model_name, \
             'Epoch_{}_JA_{:.4}_DDI_{:.4}.model'.format(epoch, ja, ddi_rate)), 'wb'))
@@ -217,7 +228,7 @@ def main(args):
             best_epoch = epoch
             best_ja = ja
 
-        print ('best_epoch: {}'.format(best_epoch))
+        print('best_epoch: {}'.format(best_epoch))
 
         dill.dump(history, open(os.path.join('saved', args.model_name, 'history_{}.pkl'.format(args.model_name)), 'wb'))
 

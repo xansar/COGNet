@@ -1,4 +1,4 @@
-name: mimic
+name: COGNet
 channels:
   - pytorch
   - conda-forge
@@ -72,7 +72,7 @@ dependencies:
   - python=3.9.6=h49503c6_1_cpython
   - python-dateutil=2.8.2=pyhd8ed1ab_0
   - python_abi=3.9=2_cp39
-  - pytorch=1.7.1=py3.9_cuda11.0.221_cudnn8.0.5_0
+#  - pytorch=1.7.1=py3.9_cuda11.0.221_cudnn8.0.5_0
   - pytz=2021.1=pyhd8ed1ab_0
   - rdkit=2021.03.4=py39hccf6a74_0
   - readline=8.1=h46c0cb4_0
@@ -86,8 +86,8 @@ dependencies:
   - threadpoolctl=2.2.0=pyhb85f177_0
   - tk=8.6.10=h21135ba_1
   - toml=0.10.2=pyhd3eb1b0_0
-  - torchaudio=0.7.2=py39
-  - torchvision=0.2.2=py_3
+#  - torchaudio=0.7.2=py39
+#  - torchvision=0.2.2=py_3
   - tornado=6.1=py39h3811e60_1
   - typing_extensions=3.10.0.0=pyh06a4308_0
   - tzdata=2021a=he74cb21_1
@@ -113,4 +113,4 @@ dependencies:
     - gpustat==0.6.0
     - nvidia-ml-py3==7.352.0
     - psutil==5.8.0
-prefix: /home/wurui/miniconda3/envs/mimic
+prefix: /data/xiangxu_zhang/miniconda3/envs/mimic

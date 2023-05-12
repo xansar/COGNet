@@ -17,6 +17,7 @@ class mimic_data(data.Dataset):
         return len(self.data)
 
 
+# DPRECATED
 def pad_batch(batch):
     seq_length = torch.tensor([len(data) for data in batch])
     batch_size = len(batch)
@@ -110,7 +111,7 @@ def pad_batch(batch):
 
 
 def pad_batch_v2_train(batch):
-    seq_length = torch.tensor([len(data) for data in batch])
+    seq_length = torch.tensor([len(data) for data in batch])    # 这里是计算序列长度
     batch_size = len(batch)
     max_seq = max(seq_length)
 
@@ -131,9 +132,12 @@ def pad_batch_v2_train(batch):
         d_dec_list_buf, d_stay_list_buf = [], []
         p_dec_list_buf, p_stay_list_buf = [], []
         for idx, seq in enumerate(data):
+            # 这样看起来,seq里面的排序分别是疾病,手术和药物
+            # 记录长度
             d_buf.append(len(seq[0]))
             p_buf.append(len(seq[1]))
             m_buf.append(len(seq[2]))
+            # 获取长度的最值
             d_max_num = max(d_max_num, len(seq[0]))
             p_max_num = max(p_max_num, len(seq[1]))
             m_max_num = max(m_max_num, len(seq[2]))
@@ -144,12 +148,12 @@ def pad_batch_v2_train(batch):
                 p_dec_list_buf.append([])
                 p_stay_list_buf.append([])
             else:
-                # 计算差集与交集
+                # 计算差集与交集,只有疾病和手术的
                 cur_d = set(seq[0])
                 last_d = set(data[idx-1][0])
-                stay_list = list(cur_d & last_d)
-                dec_list = list(last_d - cur_d)
-                d_dec_list_buf.append(dec_list)
+                stay_list = list(cur_d & last_d)    # 交集
+                dec_list = list(last_d - cur_d)  # 差集
+                d_dec_list_buf.append(dec_list)  # 记录每一条数据跟上一条的交集和差集
                 d_stay_list_buf.append(stay_list)
 
                 cur_p = set(seq[1])
@@ -158,7 +162,7 @@ def pad_batch_v2_train(batch):
                 proc_dec_list = list(last_p - cur_p)
                 p_dec_list_buf.append(proc_dec_list)
                 p_stay_list_buf.append(proc_stay_list)
-        d_length_matrix.append(d_buf)
+        d_length_matrix.append(d_buf)   # batch, 序列长度, 里面的疾病个数
         p_length_matrix.append(p_buf)
         m_length_matrix.append(m_buf)
         d_dec_list.append(d_dec_list_buf)
@@ -170,7 +174,7 @@ def pad_batch_v2_train(batch):
     m_mask_matrix = torch.full((batch_size, max_seq, m_max_num), -1e9)
     for i in range(batch_size):
         for j in range(len(m_length_matrix[i])):
-            m_mask_matrix[i, j, :m_length_matrix[i][j]] = 0.
+            m_mask_matrix[i, j, :m_length_matrix[i][j]] = 0.    # 这里是把有值的position标记为0
 
     # 生成d_mask_matrix
     d_mask_matrix = torch.full((batch_size, max_seq, d_max_num), -1e9)
@@ -191,8 +195,10 @@ def pad_batch_v2_train(batch):
     stay_disease_mask = torch.full((batch_size, max_seq, d_max_num), -1e9)
     for b_id, (dec_seqs, stay_seqs) in enumerate(zip(d_dec_list, d_stay_list)):
         for s_id, (dec_adm, stay_adm) in enumerate(zip(dec_seqs, stay_seqs)):
+            # 标记那些位置是共同的,哪些位置是多出来的,把变动和不变的都放进去
             dec_disease_tensor[b_id, s_id, :len(dec_adm)] = torch.tensor(dec_adm)
             stay_disease_tensor[b_id, s_id, :len(stay_adm)] = torch.tensor(stay_adm)
+
             dec_disease_mask[b_id, s_id, :len(dec_adm)] = 0.
             stay_disease_mask[b_id, s_id, :len(dec_adm)] = 0.
 

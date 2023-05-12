@@ -31,14 +31,14 @@ class Beam(object):
         self.tt = torch.cuda if device.type=='cuda' else torch
 
         # 每一个生成结果的分数，初始是beam_size个0
-        self.scores = self.tt.FloatTensor(size).zero_()
+        self.scores = self.tt.FloatTensor(size).zero_().to(device)
         self.all_scores = []
 
         # The backpointers at each time-step.
         self.prev_ks = []
 
         # The outputs at each time-step.
-        self.next_ys = [self.tt.LongTensor(size).fill_(self.BOS)]
+        self.next_ys = [self.tt.LongTensor(size).fill_(self.BOS).to(device)]
         self.prob_list = []
 
 

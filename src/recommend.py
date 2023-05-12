@@ -21,15 +21,15 @@ from beam import Beam
 
 import sys
 sys.path.append("..")
-from models import Leap, CopyDrug_batch, CopyDrug_tranformer, CopyDrug_generate_prob, CopyDrug_diag_proc_encode
-from COGNet_model import COGNet
+# from models import Leap, CopyDrug_batch, CopyDrug_tranformer, CopyDrug_generate_prob, CopyDrug_diag_proc_encode
+from HyperCOGNet_model import HyperCOGNet
 from util import llprint, sequence_metric, sequence_metric_v2, sequence_output_process, ddi_rate_score, get_n_params, output_flatten, print_result
 
 torch.manual_seed(1203)
 
 # 读取disease跟proc的英文名
-icd_diag_path = '../data/D_ICD_DIAGNOSES.csv'
-icd_proc_path = '../data/D_ICD_PROCEDURES.csv'
+icd_diag_path = '../../../data/mimic_iii/D_ICD_DIAGNOSES.csv'
+icd_proc_path = '../../../data/mimic_iii/D_ICD_PROCEDURES.csv'
 code2diag = {}
 code2proc = {}
 with open(icd_diag_path, 'r') as f:
@@ -75,9 +75,12 @@ def eval_recommend_batch(model, batch_data, device, TOKENS, args):
 
     batch_size = medications.size(0)
     max_visit_num = medications.size(1)
-
-    input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix, 
-        seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
+    if model.name == 'HyperCOGNet':
+        input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory, con_loss = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
+            seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
+    else:
+        input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory= model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
+            seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
 
     partial_input_medication = torch.full((batch_size, max_visit_num, 1), SOS_TOKEN).to(device)
     parital_logits = None
@@ -124,9 +127,12 @@ def test_recommend_batch(model, batch_data, device, TOKENS, ddi_adj, args):
 
     batch_size = medications.size(0)
     visit_num = medications.size(1)
-
-    input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix, 
-        seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
+    if model.name == 'HyperCOGNet':
+        input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory, con_loss = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
+            seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
+    else:
+        input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
+            seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
 
     # partial_input_medication = torch.full((batch_size, visit_num, 1), SOS_TOKEN).to(device)
     # parital_logits = None
@@ -152,7 +158,7 @@ def test_recommend_batch(model, batch_data, device, TOKENS, ddi_adj, args):
         len_dec_seq = i + 1
         # b.get_current_state(): (beam_size, len_dec_seq) --> (beam_size, 1, len_dec_seq)
         # dec_partial_inputs: (beam_size, visit_num, len_dec_seq)
-        dec_partial_inputs = torch.cat([b.get_current_state().unsqueeze(dim=1) for b in beams], dim=1)
+        dec_partial_inputs = torch.cat([b.get_current_state().unsqueeze(dim=1) for b in beams], dim=1).to(device)
         # dec_partial_inputs = dec_partial_inputs.view(args.beam_size, visit_num, len_dec_seq)
 
         partial_m_mask_matrix = torch.zeros((args.beam_size, visit_num, len_dec_seq), device=device).float()
@@ -192,71 +198,72 @@ def test_recommend_batch(model, batch_data, device, TOKENS, ddi_adj, args):
 
 # evaluate
 def eval(model, eval_dataloader, voc_size, epoch, device, TOKENS, args):
-    model.eval()
-    END_TOKEN, DIAG_PAD_TOKEN, PROC_PAD_TOKEN, MED_PAD_TOKEN, SOS_TOKEN = TOKENS
-    ja, prauc, avg_p, avg_r, avg_f1 = [[] for _ in range(5)]
-    smm_record = []
-    med_cnt, visit_cnt = 0, 0
+    with torch.no_grad():
+        model.eval()
+        END_TOKEN, DIAG_PAD_TOKEN, PROC_PAD_TOKEN, MED_PAD_TOKEN, SOS_TOKEN = TOKENS
+        ja, prauc, avg_p, avg_r, avg_f1 = [[] for _ in range(5)]
+        smm_record = []
+        med_cnt, visit_cnt = 0, 0
 
-    # fw = open("prediction_results.txt", "w")
+        # fw = open("prediction_results.txt", "w")
 
-    for idx, data in enumerate(eval_dataloader):
-        diseases, procedures, medications, seq_length, \
-            d_length_matrix, p_length_matrix, m_length_matrix, \
-                d_mask_matrix, p_mask_matrix, m_mask_matrix, \
-                    dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, \
-                        dec_proc, stay_proc, dec_proc_mask, stay_proc_mask = data
-        visit_cnt += seq_length.sum().item()
+        for idx, data in enumerate(eval_dataloader):
+            diseases, procedures, medications, seq_length, \
+                d_length_matrix, p_length_matrix, m_length_matrix, \
+                    d_mask_matrix, p_mask_matrix, m_mask_matrix, \
+                        dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, \
+                            dec_proc, stay_proc, dec_proc_mask, stay_proc_mask = data
+            visit_cnt += seq_length.sum().item()
 
-        output_logits = eval_recommend_batch(model, data, device, TOKENS, args)
+            output_logits = eval_recommend_batch(model, data, device, TOKENS, args)
 
-        # 每一个med上的预测结果
-        labels, predictions = output_flatten(medications, output_logits, seq_length, m_length_matrix, voc_size[2], END_TOKEN, device, training=False, testing=False, max_len=args.max_len)
+            # 每一个med上的预测结果
+            labels, predictions = output_flatten(medications, output_logits, seq_length, m_length_matrix, voc_size[2], END_TOKEN, device, training=False, testing=False, max_len=args.max_len)
 
-        y_gt = []       # groud truth 表示正确的label   0-1序列
-        y_pred = []     # 预测的结果    0-1序列
-        y_pred_prob = []    # 预测的每一个药物的平均概率，非0-1序列
-        y_pred_label = []   # 预测的结果，非0-1序列
-        # 针对每一个admission的预测结果
-        for label, prediction in zip(labels, predictions):
-            y_gt_tmp = np.zeros(voc_size[2])
-            y_gt_tmp[label] = 1    # 01序列，表示正确的label
-            y_gt.append(y_gt_tmp)
+            y_gt = []       # groud truth 表示正确的label   0-1序列
+            y_pred = []     # 预测的结果    0-1序列
+            y_pred_prob = []    # 预测的每一个药物的平均概率，非0-1序列
+            y_pred_label = []   # 预测的结果，非0-1序列
+            # 针对每一个admission的预测结果
+            for label, prediction in zip(labels, predictions):
+                y_gt_tmp = np.zeros(voc_size[2])
+                y_gt_tmp[label] = 1    # 01序列，表示正确的label
+                y_gt.append(y_gt_tmp)
 
-            # label: med set
-            # prediction: [med_num, probability]
-            out_list, sorted_predict = sequence_output_process(prediction, [voc_size[2], voc_size[2]+1])
-            y_pred_label.append(sorted(sorted_predict))
-            y_pred_prob.append(np.mean(prediction[:, :-2], axis=0))
+                # label: med set
+                # prediction: [med_num, probability]
+                out_list, sorted_predict = sequence_output_process(prediction, [voc_size[2], voc_size[2]+1])
+                y_pred_label.append(sorted(sorted_predict))
+                y_pred_prob.append(np.mean(prediction[:, :-2], axis=0))
 
-            # prediction label
-            y_pred_tmp = np.zeros(voc_size[2])
-            y_pred_tmp[out_list] = 1
-            y_pred.append(y_pred_tmp)
-            med_cnt += len(sorted_predict)
+                # prediction label
+                y_pred_tmp = np.zeros(voc_size[2])
+                y_pred_tmp[out_list] = 1
+                y_pred.append(y_pred_tmp)
+                med_cnt += len(sorted_predict)
 
-            # if idx < 100:
-            #     fw.write(print_result(label, sorted_predict))
+                # if idx < 100:
+                #     fw.write(print_result(label, sorted_predict))
 
-        smm_record.append(y_pred_label)
+            smm_record.append(y_pred_label)
 
-        adm_ja, adm_prauc, adm_avg_p, adm_avg_r, adm_avg_f1 = \
-                sequence_metric(np.array(y_gt), np.array(y_pred), np.array(y_pred_prob), np.array(y_pred_label))
-        ja.append(adm_ja)
-        prauc.append(adm_prauc)
-        avg_p.append(adm_avg_p)
-        avg_r.append(adm_avg_r)
-        avg_f1.append(adm_avg_f1)
-        llprint('\rtest step: {} / {}'.format(idx, len(eval_dataloader)))
+            adm_ja, adm_prauc, adm_avg_p, adm_avg_r, adm_avg_f1 = \
+                    sequence_metric(np.array(y_gt), np.array(y_pred), np.array(y_pred_prob), y_pred_label)  # 这里y_pred_label不一样长，没办法变成array
+            ja.append(adm_ja)
+            prauc.append(adm_prauc)
+            avg_p.append(adm_avg_p)
+            avg_r.append(adm_avg_r)
+            avg_f1.append(adm_avg_f1)
+            llprint('\rtest step: {} / {}'.format(idx, len(eval_dataloader)))
 
-    # fw.close()
+        # fw.close()
 
-    # ddi rate
-    ddi_rate = ddi_rate_score(smm_record, path='../data/ddi_A_final.pkl')
+        # ddi rate
+        ddi_rate = ddi_rate_score(smm_record, path='../data/ddi_A_final.pkl')
 
-    llprint('\nDDI Rate: {:.4}, Jaccard: {:.4},  PRAUC: {:.4}, AVG_PRC: {:.4}, AVG_RECALL: {:.4}, AVG_F1: {:.4}, AVG_MED: {:.4}\n'.format(
-        ddi_rate, np.mean(ja), np.mean(prauc), np.mean(avg_p), np.mean(avg_r), np.mean(avg_f1), med_cnt / visit_cnt
-    ))
+        llprint('\nDDI Rate: {:.4}, Jaccard: {:.4},  PRAUC: {:.4}, AVG_PRC: {:.4}, AVG_RECALL: {:.4}, AVG_F1: {:.4}, AVG_MED: {:.4}\n'.format(
+            ddi_rate, np.mean(ja), np.mean(prauc), np.mean(avg_p), np.mean(avg_r), np.mean(avg_f1), med_cnt / visit_cnt
+        ))
 
     return ddi_rate, np.mean(ja), np.mean(prauc), np.mean(avg_p), np.mean(avg_r), np.mean(avg_f1), med_cnt / visit_cnt
 
@@ -370,7 +377,7 @@ def test(model, test_dataloader, diag_voc, pro_voc, med_voc, voc_size, epoch, de
         all_pred_list.append(pred_list)
         all_label_list.append(labels)
         adm_ja, adm_prauc, adm_avg_p, adm_avg_r, adm_avg_f1 = \
-                sequence_metric(np.array(y_gt), np.array(y_pred), np.array(y_pred_prob), np.array(y_pred_label))
+                sequence_metric(np.array(y_gt), np.array(y_pred), np.array(y_pred_prob), y_pred_label)
         ja.append(adm_ja)
         prauc.append(adm_prauc)
         avg_p.append(adm_avg_p)

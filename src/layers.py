@@ -62,6 +62,7 @@ class SelfAttend(nn.Module):
         gates = self.gate_layer(self.h1(seqs)).squeeze(-1)
         if seq_masks is not None:
             gates = gates + seq_masks
+        # 这里softmax的维度是什么?是一个visit中所有item的注意力，这里相当于
         p_attn = F.softmax(gates, dim=-1)
         p_attn = p_attn.unsqueeze(-1)
         h = seqs * p_attn

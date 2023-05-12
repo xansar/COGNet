@@ -307,9 +307,10 @@ def get_ddi_matrix(records, med_voc, ddi_file):
 
 if __name__ == '__main__':
     # MIMIC数据文件，分别包括药物、诊断和proc
-    med_file = '/data/mimic-iii/PRESCRIPTIONS.csv'
-    diag_file = '/data/mimic-iii/DIAGNOSES_ICD.csv'
-    procedure_file = '/data/mimic-iii/PROCEDURES_ICD.csv'
+
+    med_file = '../../../data/mimic_iii/PRESCRIPTION.csv'
+    diag_file = '../../../data/mimic_iii/DIAGNOSES_ICD.csv'
+    procedure_file = '../../../data/mimic_iii/PROCEDURES_ICD.csv'
 
     # 药物信息
     med_structure_file = './idx2drug.pkl'   # 药物到分子式的映射
@@ -328,7 +329,7 @@ if __name__ == '__main__':
     # CID000002173,CID000003345,C0002063,alkalosis
     # CID000002173,CID000003345,C0004604,Back Ache
     # CID000002173,CID000003345,C0034063,lung edema
-    ddi_file = '/data/drug-DDI.csv'
+    ddi_file = '../../../data/mimic_iii/drug-DDI.csv'
 
     # 处理MIMIC中的药物数据
     med_pd = med_process(med_file)
