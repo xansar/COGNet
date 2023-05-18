@@ -1,29 +1,38 @@
+# -*- coding: utf-8 -*-
+
+"""
+@author: xansar
+@software: PyCharm
+@file: HyboCOGNet.py
+@time: 2023/5/15 18:49
+@e-mail: xansar@ruc.edu.cn
+"""
 import torch
-import torch.sparse as tsp
-from torch._C import device
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
-import dgl.sparse as dglsp
-from torch.nn.modules.linear import Linear
-from data.processing import process_visit_lg2
 
 from info_nce import InfoNCE
 
-from layers import SelfAttend
-from layers import GraphConvolution
+from ..modules import \
+    Lorentz, \
+    LorentzEmbeddings, \
+    LorentzHyperGraphEmbed, \
+    LorentzTransformerEncoderLayer, \
+    LorentzMedTransformerDecoder, \
+    LorentzFusionLinear, \
+    LorentzSelfAttend, \
+    LorentzLinear
 
-from hypergraph_layers import HyperGraphEmbed
 
-
-class HyperCOGNet(nn.Module):
+class HyboCOGNet(nn.Module):
     """在CopyDrug_batch基础上将medication的encode部分修改为transformer encoder"""
 
-    def __init__(self, voc_size, ehr_adj, ddi_adj, ddi_mask_H, H, A, emb_dim=64, n_layers=2,
+    def __init__(self, voc_size, ehr_adj, ddi_adj, ddi_mask_H, H, A, emb_dim=64, drop_out=0.3, n_layers=2,
                  device=torch.device('cpu:0')):
-        super(HyperCOGNet, self).__init__()
-        self.name = 'HyperCOGNet'
+        super(HyboCOGNet, self).__init__()
+        self.name = 'HyboCOGNet'
         self.voc_size = voc_size
         self.emb_dim = emb_dim
         self.device = device
@@ -34,41 +43,47 @@ class HyperCOGNet(nn.Module):
         self.DIAG_PAD_TOKEN = voc_size[0] + 2
         self.PROC_PAD_TOKEN = voc_size[1] + 2
 
+        self.manifold = Lorentz()
+
         self.tensor_ddi_mask_H = torch.FloatTensor(ddi_mask_H).to(device)
 
         # dig_num * emb_dim
-        self.diag_embedding = nn.Sequential(
-            nn.Embedding(voc_size[0] + 3, emb_dim, self.DIAG_PAD_TOKEN),
-            nn.Dropout(0.3)
-        )
+        self.diag_embedding = LorentzEmbeddings(self.manifold, emb_dim, voc_size[0] + 3, self.DIAG_PAD_TOKEN, dropout=drop_out)
+        # self.diag_embedding = nn.Sequential(
+        #     nn.Embedding(voc_size[0] + 3, emb_dim, self.DIAG_PAD_TOKEN),
+        #     nn.Dropout(0.3)
+        # )
 
         # proc_num * emb_dim
-        self.proc_embedding = nn.Sequential(
-            nn.Embedding(voc_size[1] + 3, emb_dim, self.PROC_PAD_TOKEN),
-            nn.Dropout(0.3)
-        )
+        self.proc_embedding = LorentzEmbeddings(self.manifold, emb_dim, voc_size[1] + 3, self.PROC_PAD_TOKEN, dropout=drop_out)
+        # self.proc_embedding = nn.Sequential(
+        #     nn.Embedding(voc_size[1] + 3, emb_dim, self.PROC_PAD_TOKEN),
+        #     nn.Dropout(0.3)
+        # )
 
         # med_num * emb_dim
-        self.med_embedding = nn.Sequential(
-            # 添加padding_idx，表示取0向量
-            nn.Embedding(voc_size[2] + 3, emb_dim, self.MED_PAD_TOKEN),
-            nn.Dropout(0.3)
-        )
+        self.med_embedding = LorentzEmbeddings(self.manifold, emb_dim, voc_size[2] + 3, self.MED_PAD_TOKEN, dropout=drop_out)
+        # self.med_embedding = nn.Sequential(
+        #     # 添加padding_idx，表示取0向量
+        #     nn.Embedding(voc_size[2] + 3, emb_dim, self.MED_PAD_TOKEN),
+        #     nn.Dropout(0.3)
+        # )
 
         # 用于对上一个visit的medication进行编码
-        # self.medication_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, dim_feedforward=emb_dim*8, batch_first=True, dropout=0.2)
-        self.medication_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, batch_first=True, dropout=0.2)
+        self.medication_encoder = LorentzTransformerEncoderLayer(self.manifold, emb_dim, self.nhead, emb_dim, drop_out,
+                                                                 drop_out)
         # 用于对当前visit的疾病与症状进行编码
-        # self.diagnoses_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, dim_feedforward=emb_dim*8, batch_first=True, dropout=0.2)
-        # self.procedure_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, dim_feedforward=emb_dim*8, batch_first=True, dropout=0.2)        
-        self.diagnoses_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, batch_first=True, dropout=0.2)
-        self.procedure_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, batch_first=True, dropout=0.2)
-        # self.enc_gru = nn.GRU(emb_dim, emb_dim, batch_first=True, bidirectional=True)
+        self.diagnoses_encoder = LorentzTransformerEncoderLayer(self.manifold, emb_dim, self.nhead, emb_dim, drop_out,
+                                                                drop_out)
+        self.procedure_encoder = LorentzTransformerEncoderLayer(self.manifold, emb_dim, self.nhead, emb_dim, drop_out,
+                                                                drop_out)
 
-        # self.ehr_gcn = GCN(
-        #     voc_size=voc_size[2], emb_dim=emb_dim, adj=ehr_adj, device=device)
-        # self.ddi_gcn = GCN(
-        #     voc_size=voc_size[2], emb_dim=emb_dim, adj=ddi_adj, device=device)
+        # # 用于对上一个visit的medication进行编码
+        # self.medication_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, batch_first=True, dropout=0.2)
+        # # 用于对当前visit的疾病与症状进行编码
+        # self.diagnoses_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, batch_first=True, dropout=0.2)
+        # self.procedure_encoder = nn.TransformerEncoderLayer(emb_dim, self.nhead, batch_first=True, dropout=0.2)
+
         self.tensor_ddi_adj = torch.FloatTensor(ddi_adj).to(device)
         ddi_idx = np.where(ddi_adj == 1)
         ddi_i = torch.tensor([ddi_idx[0], ddi_idx[1]], dtype=torch.long)
@@ -79,90 +94,86 @@ class HyperCOGNet(nn.Module):
             size=(self.MED_PAD_TOKEN + 1, self.MED_PAD_TOKEN + 1)
         ).coalesce().to(device)
 
-        # self.dglsp_ddi_adj = dglsp.spmatrix(
-        #     torch.tensor([ddi_idx[0], ddi_idx[1]], dtype=torch.long),
-        #     shape=(self.MED_PAD_TOKEN + 1, self.MED_PAD_TOKEN + 1)
-        # ).coalesce().to(device)
         H = H.to(device)
         A = A.to(device)
 
-        # self.gcn =  GCN(voc_size=voc_size[2], emb_dim=emb_dim, ehr_adj=ehr_adj, ddi_adj=ddi_adj, device=device)
-        self.hgcn = HyperGraphEmbed(embedding_dim=emb_dim, n_layers=n_layers, H=H, A=A, ddi_A=self.tsp_ddi_adj)
+        # self.hgcn = HyperGraphEmbed(embedding_dim=emb_dim, n_layers=n_layers, H=H, A=A, ddi_A=self.tsp_ddi_adj)
+        self.hgcn = LorentzHyperGraphEmbed(manifold=self.manifold, embedding_dim=emb_dim, n_layers=n_layers, H=H, A=A,
+                                           ddi_A=self.tsp_ddi_adj, use_att=False)
 
-        self.d_global_local_fusion_layer = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim),
-            nn.LeakyReLU()
-        )
+        # 写一个两个view的embed融合的模块
+        self.d_global_local_fusion_layer = LorentzFusionLinear(emb_dim, emb_dim, self.manifold, drop_out)
+        self.p_global_local_fusion_layer = LorentzFusionLinear(emb_dim, emb_dim, self.manifold, drop_out)
+        self.m_1_global_local_fusion_layer = LorentzFusionLinear(emb_dim, emb_dim, self.manifold, drop_out)
+        self.m_2_global_local_fusion_layer = LorentzFusionLinear(emb_dim, emb_dim, self.manifold, drop_out)
 
-        self.p_global_local_fusion_layer = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim),
-            nn.LeakyReLU()
-        )
-
-        self.m_global_local_fusion_layer = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim),
-            nn.LeakyReLU()
-        )
-
-        self.m_2_global_local_fusion_layer = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim),
-            nn.LeakyReLU()
-        )
+        # self.d_global_local_fusion_layer = nn.Sequential(
+        #     nn.Linear(emb_dim * 2, emb_dim),
+        #     nn.LeakyReLU()
+        # )
+        #
+        # self.p_global_local_fusion_layer = nn.Sequential(
+        #     nn.Linear(emb_dim * 2, emb_dim),
+        #     nn.LeakyReLU()
+        # )
+        #
+        # self.m_global_local_fusion_layer = nn.Sequential(
+        #     nn.Linear(emb_dim * 2, emb_dim),
+        #     nn.LeakyReLU()
+        # )
+        #
+        # self.m_2_global_local_fusion_layer = nn.Sequential(
+        #     nn.Linear(emb_dim * 2, emb_dim),
+        #     nn.LeakyReLU()
+        # )
 
         self.inter = nn.Parameter(torch.FloatTensor([1]))
 
-        # 聚合单个visit内的diag和proc得到visit-level的表达
-        self.diag_self_attend = SelfAttend(emb_dim)
-        self.proc_self_attend = SelfAttend(emb_dim)
+        # 这两个参数是用来计算cross visit attention scores的时候用的
+        self.scale_d = nn.Parameter(torch.tensor([math.sqrt(emb_dim)]))
+        self.scale_p = nn.Parameter(torch.tensor([math.sqrt(emb_dim)]))
+        self.scale_copy = nn.Parameter(torch.tensor([math.sqrt(emb_dim)]))
+        self.bias_d = nn.Parameter(torch.zeros(()))
+        self.bias_p = nn.Parameter(torch.zeros(()))
+        self.bias_copy = nn.Parameter(torch.zeros(()))
 
-        self.decoder = MedTransformerDecoder(emb_dim, self.nhead, dim_feedforward=emb_dim * 2, dropout=0.2,
-                                             layer_norm_eps=1e-5)
+        # 聚合单个visit内的diag和proc得到visit-level的表达
+        self.diag_self_attend = LorentzSelfAttend(self.manifold, emb_dim)
+        self.proc_self_attend = LorentzSelfAttend(self.manifold, emb_dim)
+
+        # self.diag_self_attend = SelfAttend(emb_dim)
+        # self.proc_self_attend = SelfAttend(emb_dim)
+
+        self.decoder = LorentzMedTransformerDecoder(self.manifold, emb_dim, self.nhead, dropout=drop_out)
+        # self.decoder = MedTransformerDecoder(emb_dim, self.nhead, dim_feedforward=emb_dim * 2, dropout=0.2,
+        #                                      layer_norm_eps=1e-5)
 
         self.info_nce_loss = InfoNCE()
 
         # 用于对每一个visit的diagnoses进行编码
 
-        # 用于生成药物序列
-        # self.dec_gru = nn.GRU(emb_dim * 3, emb_dim, batch_first=True)
-
-        # self.diag_attn = nn.Linear(emb_dim * 2, 1)
-        # self.proc_attn = nn.Linear(emb_dim * 2, 1)
-        # self.W_diag_attn = nn.Linear(emb_dim, emb_dim)
-        # self.W_proc_attn = nn.Linear(emb_dim, emb_dim)
-        # self.W_diff_attn = nn.Linear(emb_dim, emb_dim)
-        # self.W_diff_proc_attn = nn.Linear(emb_dim, emb_dim)
-
         # weights
-        # self.Ws = nn.Linear(emb_dim * 2, emb_dim)  # only used at initial stage
-        self.Wo = nn.Linear(emb_dim, voc_size[2] + 2)  # generate mode
-        # self.Wc = nn.Linear(emb_dim*2, emb_dim)  # copy mode
-        self.Wc = nn.Linear(emb_dim, emb_dim)  # copy mode
+        self.Wo = LorentzLinear(self.manifold,
+                                emb_dim,
+                                voc_size[2] + 2)  # generate mode
+        self.Wc = LorentzLinear(self.manifold, emb_dim, emb_dim)  # copy mode
 
-        # self.W_dec = nn.Linear(emb_dim, emb_dim)
-        # self.W_stay = nn.Linear(emb_dim, emb_dim)
-        # self.W_proc_dec = nn.Linear(emb_dim, emb_dim)
-        # self.W_proc_stay = nn.Linear(emb_dim, emb_dim)
+        # self.Wo = nn.Linear(emb_dim, voc_size[2] + 2)  # generate mode
+        # self.Wc = nn.Linear(emb_dim, emb_dim)  # copy mode
 
         # swtich network to calculate generate probablity
-        self.W_z = nn.Linear(emb_dim, 1)
-
-        # self.weight = nn.Parameter(torch.tensor([0.3]), requires_grad=True)
-        # bipartite local embedding
-        # self.bipartite_transform = nn.Sequential(
-        #     nn.Linear(emb_dim, ddi_mask_H.shape[1])
-        # )
-        # self.bipartite_output = MaskLinear(
-        #     ddi_mask_H.shape[1], voc_size[2], False)
+        self.W_z = LorentzLinear(self.manifold, emb_dim, 1)
+        # self.W_z = nn.Linear(emb_dim, 1)
 
     def cache_embedding_for_eval(self):
-        diseases_embed = self.diag_embedding(torch.arange(self.DIAG_PAD_TOKEN + 1).to(self.device))
-        pros_embed = self.proc_embedding(torch.arange(self.PROC_PAD_TOKEN + 1).to(self.device))
-        meds_embed = self.med_embedding(torch.arange(self.MED_PAD_TOKEN + 1).to(self.device))
+        diseases_embed = self.diag_embedding(torch.arange(self.DIAG_PAD_TOKEN + 1).to(self.device), use_position_encoding=False)
+        pros_embed = self.proc_embedding(torch.arange(self.PROC_PAD_TOKEN + 1).to(self.device), use_position_encoding=False)
+        meds_embed = self.med_embedding(torch.arange(self.MED_PAD_TOKEN + 1).to(self.device), use_position_encoding=False)
         # 这里需要区分验证和测试，测试的时候显然不需要每个
         # 这里计算是按照batch来的，一个batch计算一次，但是验证的时候，应该是一个epoch计算一次就可以了
         # 因此需要将这几个embedding，存储下来
         _, _, disease_embed, pro_embed, med_embed, ddi_embedding = self.hgcn(diseases_embed, pros_embed,
-                                                                                       meds_embed)
+                                                                             meds_embed)
         self.disease_embed = disease_embed
         self.pro_embed = pro_embed
         self.med_embed = med_embed
@@ -172,10 +183,12 @@ class HyperCOGNet(nn.Module):
         def row_shuffle(embedding):
             corrupted_embedding = embedding[torch.randperm(embedding.size()[0])]
             return corrupted_embedding
+
         def row_column_shuffle(embedding):
             corrupted_embedding = embedding[torch.randperm(embedding.size()[0])]
-            corrupted_embedding = corrupted_embedding[:,torch.randperm(corrupted_embedding.size()[1])]
+            corrupted_embedding = corrupted_embedding[:, torch.randperm(corrupted_embedding.size()[1])]
             return corrupted_embedding
+
         def score(x1, x2):
             return torch.sum(torch.mul(x1, x2), 1)
 
@@ -183,14 +196,19 @@ class HyperCOGNet(nn.Module):
         neg1 = score(sess_emb_lgcn, row_column_shuffle(sess_emb_hgnn))  # 感觉shuffle效果一般
         one = torch.cuda.FloatTensor(neg1.shape[0]).fill_(1).to(self.device)
         # one = zeros = torch.ones(neg1.shape[0])
-        con_loss = torch.sum(-torch.log(1e-8 + torch.sigmoid(pos))-torch.log(1e-8 + (one - torch.sigmoid(neg1))))
+        con_loss = torch.sum(-torch.log(1e-8 + torch.sigmoid(pos)) - torch.log(1e-8 + (one - torch.sigmoid(neg1))))
         if torch.isnan(con_loss).any():
             con_loss = torch.tensor(0., dtype=con_loss.dtype, device=con_loss.device)
 
         return con_loss
 
-    def infoNCELoss(self, hyp_embed, linear_embed):
-        loss = self.info_nce_loss(hyp_embed, linear_embed)
+    def infoNCELoss(self, view_1_embed, view_2_embed):
+        assert view_1_embed.shape == view_2_embed.shape
+        if len(view_1_embed.shape) > 2:
+            embed_dim = view_1_embed.shape[-1]
+            view_1_embed = view_1_embed.reshape(-1, embed_dim)
+            view_2_embed = view_2_embed.reshape(-1, embed_dim)
+        loss = self.info_nce_loss(view_1_embed, view_2_embed)
         return loss
 
     def encode(self, diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix, seq_length,
@@ -211,35 +229,37 @@ class HyperCOGNet(nn.Module):
         #             a. 需要引入一个新的张量(batch_size, max_T)，来记录每条数据包含哪些超边
 
         ## 初始embed，用于后面local和global的encode
-        disease_embed = self.diag_embedding(torch.arange(self.DIAG_PAD_TOKEN + 1).to(device))
-        pro_embed = self.proc_embedding(torch.arange(self.PROC_PAD_TOKEN + 1).to(device))
-        med_embed = self.med_embedding(torch.arange(self.MED_PAD_TOKEN + 1).to(device))
-
-        if self.training:
-            # 训练状态下，每个batch都会更新embedding
-            self.disease_embed = None
-            self.pro_embed = None
-            self.med_embed = None
-            self.ddi_embedding = None
-
-            # 这里需要区分验证和测试，测试的时候显然不需要每个
-            # 这里计算是按照batch来的，一个batch计算一次，但是验证的时候，应该是一个epoch计算一次就可以了
-            # 因此需要将这几个embedding，存储下来
-            hyper_rep, linear_rep, h_disease_embed, h_pro_embed, h_med_embed, ddi_embedding = self.hgcn(disease_embed,
-                                                                                                        pro_embed,
-                                                                                                        med_embed)
-
-            # 计算对比学习损失
-            # con_loss = self.SSL(hyper_rep, linear_rep)
-            con_loss = self.info_nce_loss(hyper_rep, linear_rep)
-            # con_loss = torch.ones(1, device=device)
-        else:
-            # 测试状态下，不需要重复计算图embedding
-            h_disease_embed = self.disease_embed
-            h_pro_embed = self.pro_embed
-            h_med_embed = self.med_embed
-            ddi_embedding = self.ddi_embedding
-            con_loss = torch.nan
+        disease_embed = self.diag_embedding(torch.arange(self.DIAG_PAD_TOKEN + 1).to(device), use_position_encoding=False)
+        pro_embed = self.proc_embedding(torch.arange(self.PROC_PAD_TOKEN + 1).to(device), use_position_encoding=False)
+        med_embed = self.med_embedding(torch.arange(self.MED_PAD_TOKEN + 1).to(device), use_position_encoding=False)
+        hyper_rep, linear_rep, h_disease_embed, h_pro_embed, h_med_embed, ddi_embedding = self.hgcn(disease_embed,
+                                                                                                    pro_embed,
+                                                                                                    med_embed)
+        # if self.training:
+        #     # 训练状态下，每个batch都会更新embedding
+        #     self.disease_embed = None
+        #     self.pro_embed = None
+        #     self.med_embed = None
+        #     self.ddi_embedding = None
+        #
+        #     # 这里需要区分验证和测试，测试的时候显然不需要每个
+        #     # 这里计算是按照batch来的，一个batch计算一次，但是验证的时候，应该是一个epoch计算一次就可以了
+        #     # 因此需要将这几个embedding，存储下来
+        #     hyper_rep, linear_rep, h_disease_embed, h_pro_embed, h_med_embed, ddi_embedding = self.hgcn(disease_embed,
+        #                                                                                                 pro_embed,
+        #                                                                                                 med_embed)
+        #
+        #     # 计算对比学习损失
+        #     # con_loss = self.SSL(hyper_rep, linear_rep)
+        #     con_loss = self.infoNCELoss(hyper_rep, linear_rep)
+        #     # con_loss = torch.ones(1, device=device)
+        # else:
+        #     # 测试状态下，不需要重复计算图embedding
+        #     h_disease_embed = self.disease_embed
+        #     h_pro_embed = self.pro_embed
+        #     h_med_embed = self.med_embed
+        #     ddi_embedding = self.ddi_embedding
+        #     con_loss = torch.nan
 
         input_disease_embedding = disease_embed[diseases].view(batch_size * max_visit_num, max_diag_num,
                                                                self.emb_dim)  # [batch, seq, max_diag_num, emb]
@@ -250,12 +270,18 @@ class HyperCOGNet(nn.Module):
         # input_disease_embedding = self.diag_embedding(diseases).view(batch_size * max_visit_num, max_diag_num, self.emb_dim)      # [batch, seq, max_diag_num, emb]
         # input_proc_embedding = self.proc_embedding(procedures).view(batch_size * max_visit_num, max_proc_num, self.emb_dim)      # [batch, seq, max_proc_num, emb]
         # _mask_matrix,用来标记数据中哪些是补的pad
-        d_enc_mask_matrix = d_mask_matrix.view(batch_size * max_visit_num, max_diag_num).unsqueeze(dim=1).unsqueeze(
-            dim=1).repeat(1, self.nhead, max_diag_num, 1)  # [batch*seq, nhead, input_length, output_length]
-        d_enc_mask_matrix = d_enc_mask_matrix.view(batch_size * max_visit_num * self.nhead, max_diag_num, max_diag_num)
-        p_enc_mask_matrix = p_mask_matrix.view(batch_size * max_visit_num, max_proc_num).unsqueeze(dim=1).unsqueeze(
-            dim=1).repeat(1, self.nhead, max_proc_num, 1)
-        p_enc_mask_matrix = p_enc_mask_matrix.view(batch_size * max_visit_num * self.nhead, max_proc_num, max_proc_num)
+        d_enc_mask_matrix = d_mask_matrix.view(batch_size * max_visit_num, max_diag_num).unsqueeze(
+                dim=1).repeat(1, max_diag_num, 1)  # [batch*seq, input_length, output_length]
+        d_enc_mask_matrix = d_enc_mask_matrix.view(batch_size * max_visit_num, max_diag_num, max_diag_num)
+        p_enc_mask_matrix = p_mask_matrix.view(batch_size * max_visit_num, max_proc_num).unsqueeze(
+                dim=1).repeat(1, max_proc_num, 1)  # [batch*seq, input_length, output_length]
+        p_enc_mask_matrix = p_enc_mask_matrix.view(batch_size * max_visit_num, max_proc_num, max_proc_num)
+        # d_enc_mask_matrix = d_mask_matrix.view(batch_size * max_visit_num, max_diag_num).unsqueeze(dim=1).unsqueeze(
+        #     dim=1).repeat(1, self.nhead, max_diag_num, 1)  # [batch*seq, nhead, input_length, output_length]
+        # d_enc_mask_matrix = d_enc_mask_matrix.view(batch_size * max_visit_num * self.nhead, max_diag_num, max_diag_num)
+        # p_enc_mask_matrix = p_mask_matrix.view(batch_size * max_visit_num, max_proc_num).unsqueeze(dim=1).unsqueeze(
+        #     dim=1).repeat(1, self.nhead, max_proc_num, 1)
+        # p_enc_mask_matrix = p_enc_mask_matrix.view(batch_size * max_visit_num * self.nhead, max_proc_num, max_proc_num)
         # 经过transformer编码的visit表示
         input_disease_embedding = self.diagnoses_encoder(input_disease_embedding, src_mask=d_enc_mask_matrix).view(
             batch_size, max_visit_num, max_diag_num, self.emb_dim)
@@ -264,14 +290,19 @@ class HyperCOGNet(nn.Module):
                                                                                                              max_proc_num,
                                                                                                              self.emb_dim)
 
-        hyper_disease_embedding = h_disease_embed[diseases]
-        hyper_proc_embedding = h_pro_embed[procedures]
+        # hyper_disease_embedding = h_disease_embed[diseases]
+        # hyper_proc_embedding = h_pro_embed[procedures]
+        #
+        # assert hyper_disease_embedding.shape == input_disease_embedding.shape
+        # assert hyper_proc_embedding.shape == input_proc_embedding.shape
+        #
+        # input_disease_embedding = self.d_global_local_fusion_layer(input_disease_embedding, hyper_disease_embedding)
+        # input_proc_embedding = self.p_global_local_fusion_layer(input_proc_embedding, hyper_proc_embedding)
+        # d_con_loss_btw_transformer_and_gcn = self.infoNCELoss(input_disease_embedding, hyper_disease_embedding)
+        # p_con_loss_btw_transformer_and_gcn = self.infoNCELoss(input_proc_embedding, hyper_proc_embedding)
 
-        assert hyper_disease_embedding.shape == input_disease_embedding.shape
-        assert hyper_proc_embedding.shape == input_proc_embedding.shape
-
-        input_disease_embedding = self.d_global_local_fusion_layer(torch.cat([input_disease_embedding, hyper_disease_embedding], dim=-1))
-        input_proc_embedding = self.p_global_local_fusion_layer(torch.cat([input_proc_embedding, hyper_proc_embedding], dim=-1))
+        # input_disease_embedding = self.d_global_local_fusion_layer(torch.cat([input_disease_embedding, hyper_disease_embedding], dim=-1))
+        # input_proc_embedding = self.p_global_local_fusion_layer(torch.cat([input_proc_embedding, hyper_proc_embedding], dim=-1))
 
         # 1.1 encode visit-level diag and proc representations
         # 这里又展开了，线性层算注意力，这里是算一个visit内的所有item的加权和
@@ -287,6 +318,7 @@ class HyperCOGNet(nn.Module):
 
         # 1.3 计算 visit-level的attention score
         # [batch_size, max_visit_num, max_visit_num]
+
         cross_visit_scores = self.calc_cross_visit_scores(visit_diag_embedding, visit_proc_embedding)
 
         # 3. 构造一个last_seq_medication，表示上一次visit的medication，第一次的由于没有上一次medication，用0填补（用啥填补都行，反正不会用到）
@@ -299,22 +331,25 @@ class HyperCOGNet(nn.Module):
         # last_seq_medication_emb = self.med_embedding(last_seq_medication)   # 这里要使用graph出来的
         last_seq_medication_emb = med_embed[last_seq_medication]
 
-        last_m_enc_mask = last_m_mask.view(batch_size * max_visit_num, max_med_num).unsqueeze(dim=1).unsqueeze(
-            dim=1).repeat(1, self.nhead, max_med_num, 1)
-        last_m_enc_mask = last_m_enc_mask.view(batch_size * max_visit_num * self.nhead, max_med_num, max_med_num)
+        last_m_enc_mask = last_m_mask.view(batch_size * max_visit_num, max_med_num).unsqueeze(dim=1).repeat(1, max_med_num, 1)
+        last_m_enc_mask = last_m_enc_mask.view(batch_size * max_visit_num, max_med_num, max_med_num)
         encoded_medication = self.medication_encoder(
             last_seq_medication_emb.view(batch_size * max_visit_num, max_med_num, self.emb_dim),
             src_mask=last_m_enc_mask)  # (batch*seq, max_med_num, emb_dim)
         encoded_medication = encoded_medication.view(batch_size, max_visit_num, max_med_num, self.emb_dim)
-        encoded_medication = self.m_global_local_fusion_layer(torch.cat([encoded_medication, h_med_embed[last_seq_medication]], dim=-1))
-
+        # encoded_medication = self.m_1_global_local_fusion_layer(encoded_medication, h_med_embed[last_seq_medication])
+        # encoded_medication = self.m_global_local_fusion_layer(torch.cat([encoded_medication, h_med_embed[last_seq_medication]], dim=-1))
 
         # vocab_size, emb_size
         # med_embed, ddi_embedding = self.gcn()   # med_embed: (n_med, embed_dim), ddi_embeding: (n_med, embed_dim)
-        med_embed = self.m_2_global_local_fusion_layer(torch.cat([med_embed, h_med_embed], dim=-1))
+        # med_embed = self.m_2_global_local_fusion_layer(med_embed, h_med_embed)
+        # m_con_loss_btw_transformer_and_gcn = self.infoNCELoss(med_embed, h_med_embed)
         drug_memory = med_embed - ddi_embedding * self.inter
         drug_memory_padding = torch.zeros((3, self.emb_dim), device=self.device).float()
         drug_memory = torch.cat([drug_memory, drug_memory_padding], dim=0)  # 没看懂这里这个padidng是干嘛
+
+        con_loss = torch.zeros(1)
+        # con_loss += d_con_loss_btw_transformer_and_gcn + p_con_loss_btw_transformer_and_gcn + m_con_loss_btw_transformer_and_gcn
         return input_disease_embedding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory, con_loss
 
     def decode(self, input_medications, input_disease_embedding, input_proc_embedding, last_medication_embedding,
@@ -329,22 +364,20 @@ class HyperCOGNet(nn.Module):
         max_diag_num = input_disease_embedding.size(2)
         max_proc_num = input_proc_embedding.size(2)
 
-        input_medication_embs = self.med_embedding(input_medications).view(batch_size * max_visit_num, max_med_num, -1)
+        input_medication_embs = self.med_embedding(input_medications, use_position_encoding=False).view(batch_size * max_visit_num, max_med_num, -1)
         # input_medication_embs = self.dropout_emb(input_medication_embs)
         input_medication_memory = drug_memory[input_medications].view(batch_size * max_visit_num, max_med_num, -1)
 
         # m_sos_mask = torch.zeros((batch_size, max_visit_num, 1), device=self.device).float() # 这里用较大负值，避免softmax之后分走了概率
         m_self_mask = m_mask_matrix
         # 像是公式12的mask
-        last_m_enc_mask = m_self_mask.view(batch_size * max_visit_num, max_med_num).unsqueeze(dim=1).unsqueeze(
-            dim=1).repeat(1, self.nhead, max_med_num, 1)
-        medication_self_mask = last_m_enc_mask.view(batch_size * max_visit_num * self.nhead, max_med_num, max_med_num)
-        m2d_mask_matrix = d_mask_matrix.view(batch_size * max_visit_num, max_diag_num).unsqueeze(dim=1).unsqueeze(
-            dim=1).repeat(1, self.nhead, max_med_num, 1)
-        m2d_mask_matrix = m2d_mask_matrix.view(batch_size * max_visit_num * self.nhead, max_med_num, max_diag_num)
-        m2p_mask_matrix = p_mask_matrix.view(batch_size * max_visit_num, max_proc_num).unsqueeze(dim=1).unsqueeze(
-            dim=1).repeat(1, self.nhead, max_med_num, 1)
-        m2p_mask_matrix = m2p_mask_matrix.view(batch_size * max_visit_num * self.nhead, max_med_num, max_proc_num)
+        last_m_enc_mask = m_self_mask.view(batch_size * max_visit_num, max_med_num).unsqueeze(
+            dim=1).repeat(1, max_med_num, 1)
+        medication_self_mask = last_m_enc_mask.view(batch_size * max_visit_num, max_med_num, max_med_num)
+        m2d_mask_matrix = d_mask_matrix.view(batch_size * max_visit_num, max_diag_num).unsqueeze(dim=1).repeat(1, max_med_num, 1)
+        m2d_mask_matrix = m2d_mask_matrix.view(batch_size * max_visit_num, max_med_num, max_diag_num)
+        m2p_mask_matrix = p_mask_matrix.view(batch_size * max_visit_num, max_proc_num).unsqueeze(dim=1).repeat(1, max_med_num, 1)
+        m2p_mask_matrix = m2p_mask_matrix.view(batch_size * max_visit_num, max_med_num, max_proc_num)
 
         dec_hidden = self.decoder(input_medication_embedding=input_medication_embs,
                                   input_medication_memory=input_medication_memory,
@@ -359,6 +392,7 @@ class HyperCOGNet(nn.Module):
         score_g = self.Wo(dec_hidden)  # (batch * max_visit_num, max_med_num, voc_size[2]+2)
         score_g = score_g.view(batch_size, max_visit_num, max_med_num, -1)
         prob_g = F.softmax(score_g, dim=-1)
+        # TODO：改这个
         score_c = self.copy_med(dec_hidden.view(batch_size, max_visit_num, max_med_num, -1), last_medication_embedding,
                                 last_m_mask, cross_visit_scores)
         # (batch_size, max_visit_num * input_med_num, max_visit_num * max_med_num)
@@ -373,12 +407,14 @@ class HyperCOGNet(nn.Module):
         # score_c_buf = score_c_buf[0, -1, -1, :] # visit_num * (visit_num * max_med_num)
         # max_med_num_in_last = len(score_c_buf) // max_visit_num
         # print(score_c_buf[-max_med_num_in_last:])
+
         prob_c_to_g = torch.zeros_like(prob_g).to(self.device).view(batch_size, max_visit_num * max_med_num,
                                                                     -1)  # (batch, max_visit_num * input_med_num, voc_size[2]+2)
 
         # 用scatter操作代替嵌套循环
         # 根据last_seq_medication中的indice，将score_c中的值加到score_c_to_g中去
         copy_source = last_medications.view(batch_size, 1, -1).repeat(1, max_visit_num * max_med_num, 1)
+        # todo：这里有加法，但是已经变成概率了，先放着
         prob_c_to_g.scatter_add_(2, copy_source, score_c)
         prob_c_to_g = prob_c_to_g.view(batch_size, max_visit_num, max_med_num, -1)
 
@@ -403,6 +439,7 @@ class HyperCOGNet(nn.Module):
             diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
             seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc,
             dec_proc_mask, stay_proc_mask, max_len=20)
+
         # 4. 构造给decoder的medications，用于decoding过程中的teacher forcing，注意维度上增加了一维，因为会多生成一个END_TOKEN
         input_medication = torch.full((batch_size, max_seq_length, 1), self.SOS_TOKEN).to(
             device)  # [batch_size, seq, 1]
@@ -411,7 +448,7 @@ class HyperCOGNet(nn.Module):
         m_sos_mask = torch.zeros((batch_size, max_seq_length, 1),
                                  device=self.device).float()  # 这里用较大负值，避免softmax之后分走了概率
         m_mask_matrix = torch.cat([m_sos_mask, m_mask_matrix], dim=-1)
-
+        #
         output_logits = self.decode(input_medication, input_disease_embdding, input_proc_embedding, encoded_medication,
                                     last_seq_medication, cross_visit_scores,
                                     d_mask_matrix, p_mask_matrix, m_mask_matrix, last_m_mask, drug_memory)
@@ -446,10 +483,16 @@ class HyperCOGNet(nn.Module):
         proc_keys = torch.cat([padding, visit_proc_embedding[:, :-1, :]], dim=1)
 
         # 得到每个visit跟自己前面所有visit的score，先算任意两个visit的相似度，然后做mask
-        diag_scores = torch.matmul(visit_diag_embedding, diag_keys.transpose(-2, -1)) \
-                      / math.sqrt(visit_diag_embedding.size(-1))  # 公式16
-        proc_scores = torch.matmul(visit_proc_embedding, proc_keys.transpose(-2, -1)) \
-                      / math.sqrt(visit_proc_embedding.size(-1))
+        # TODO：这里是注意力操作，可以看看多头注意力
+
+        diag_scores = (2 + 2 * self.manifold.cinner(visit_diag_embedding, diag_keys)) \
+                      / self.scale_d + self.bias_d
+        proc_scores = (2 + 2 * self.manifold.cinner(visit_proc_embedding, proc_keys)) \
+                      / self.scale_p + self.bias_p
+        # diag_scores = torch.matmul(visit_diag_embedding, diag_keys.transpose(-2, -1)) \
+        #               / math.sqrt(visit_diag_embedding.size(-1))  # 公式16
+        # proc_scores = torch.matmul(visit_proc_embedding, proc_keys.transpose(-2, -1)) \
+        #               / math.sqrt(visit_proc_embedding.size(-1))
         # 1st visit's scores is not zero!
         scores = F.softmax(diag_scores + proc_scores + mask, dim=-1)
 
@@ -472,11 +515,15 @@ class HyperCOGNet(nn.Module):
         max_visit_num = decode_input_hiddens.size(1)
         input_med_num = decode_input_hiddens.size(2)
         max_med_num = last_medications.size(2)
+        # 这里线性已经改了LorentzLinear了
         copy_query = self.Wc(decode_input_hiddens).view(-1, max_visit_num * input_med_num, self.emb_dim)
-        attn_scores = torch.matmul(copy_query,
-                                   last_medications.view(-1, max_visit_num * max_med_num, self.emb_dim).transpose(-2,
-                                                                                                                  -1)) / math.sqrt(
-            self.emb_dim)  # 公式19
+        # 这里是注意力，需要改成基于距离的
+        attn_scores = (2 + 2 * self.manifold.cinner(copy_query, last_medications.view(-1, max_visit_num * max_med_num, self.emb_dim))) \
+                      / self.scale_copy + self.bias_copy
+        # attn_scores = torch.matmul(copy_query,
+        #                            last_medications.view(-1, max_visit_num * max_med_num, self.emb_dim).transpose(-2,
+        #                                                                                                           -1)) / math.sqrt(
+        #     self.emb_dim)  # 公式19
         med_mask = last_m_mask.view(-1, 1, max_visit_num * max_med_num).repeat(1, max_visit_num * input_med_num, 1)
         # [batch_size, max_vist_num * input_med_num, max_visit_num * max_med_num]
         attn_scores = F.softmax(attn_scores + med_mask, dim=-1)
@@ -488,203 +535,10 @@ class HyperCOGNet(nn.Module):
         # (batch_size, max_visit_num * input_med_num, max_visit_num * max_med_num)
         visit_scores = visit_scores.unsqueeze(-1).repeat(1, 1, 1, max_med_num).view(-1, max_visit_num * input_med_num,
                                                                                     max_visit_num * max_med_num)
-
+        # todo:这里存疑
+        # scores = 2 + 2 * self.manifold.cinner(attn_scores, visit_scores).clamp(min=1e-9)
         scores = torch.mul(attn_scores, visit_scores).clamp(min=1e-9)  # 公式20
         row_scores = scores.sum(dim=-1, keepdim=True)
         scores = scores / row_scores  # (batch_size, max_visit_num * input_med_num, max_visit_num * max_med_num)
 
         return scores
-
-
-class MedTransformerDecoder(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 layer_norm_eps=1e-5) -> None:
-        super(MedTransformerDecoder, self).__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.m2d_multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.m2p_multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm3 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
-
-        self.activation = nn.ReLU()
-        self.nhead = nhead
-
-        # self.align = nn.Linear(d_model, d_model)
-
-    def forward(self, input_medication_embedding, input_medication_memory, input_disease_embdding, input_proc_embedding,
-                input_medication_self_mask, d_mask, p_mask):
-        r"""Pass the inputs (and mask) through the decoder layer.
-        Args:
-            input_medication_embedding: [*, max_med_num+1, embedding_size]
-        Shape:
-            see the docs in Transformer class.
-        """
-        input_len = input_medication_embedding.size(0)
-        tgt_len = input_medication_embedding.size(1)
-
-        # [batch_size*visit_num, max_med_num+1, max_med_num+1]
-        subsequent_mask = self.generate_square_subsequent_mask(tgt_len, input_len * self.nhead,
-                                                               input_disease_embdding.device)
-        self_attn_mask = subsequent_mask + input_medication_self_mask
-
-        x = input_medication_embedding + input_medication_memory
-
-        x = self.norm1(x + self._sa_block(x, self_attn_mask))
-        # attentioned_disease_embedding = self._m2d_mha_block(x, input_disease_embdding, d_mask)
-        # attentioned_proc_embedding = self._m2p_mha_block(x, input_proc_embedding, p_mask)
-        # x = self.norm3(x + self._ff_block(torch.cat([attentioned_disease_embedding, self.align(attentioned_proc_embedding)], dim=-1)))
-        x = self.norm2(
-            x + self._m2d_mha_block(x, input_disease_embdding, d_mask) + self._m2p_mha_block(x, input_proc_embedding,
-                                                                                             p_mask))  # 公式12，这里把visit展到第一维上，那么做注意力时不会跨visit计算
-        x = self.norm3(x + self._ff_block(x))
-
-        return x
-
-    # self-attention block
-    def _sa_block(self, x, attn_mask):
-        x = self.self_attn(x, x, x,
-                           attn_mask=attn_mask,
-                           need_weights=False)[0]
-        return self.dropout1(x)
-
-    # multihead attention block
-    def _m2d_mha_block(self, x, mem, attn_mask):
-        x = self.m2d_multihead_attn(x, mem, mem,
-                                    attn_mask=attn_mask,
-                                    need_weights=False)[0]
-        return self.dropout2(x)
-
-    def _m2p_mha_block(self, x, mem, attn_mask):
-        x = self.m2p_multihead_attn(x, mem, mem,
-                                    attn_mask=attn_mask,
-                                    need_weights=False)[0]
-        return self.dropout2(x)
-
-    # feed forward block
-    def _ff_block(self, x):
-        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
-        return self.dropout3(x)
-
-    def generate_square_subsequent_mask(self, sz: int, batch_size: int, device):
-        r"""Generate a square mask for the sequence. The masked positions are filled with float('-inf').
-            Unmasked positions are filled with float(0.0).
-        """
-        mask = (torch.triu(torch.ones((sz, sz), device=device)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, -1e9).masked_fill(mask == 1, float(0.0))
-        mask = mask.unsqueeze(0).repeat(batch_size, 1, 1)
-        return mask
-
-
-class PositionEmbedding(nn.Module):
-    """
-    We assume that the sequence length is less than 512.
-    """
-
-    def __init__(self, emb_size, max_length=512):
-        super(PositionEmbedding, self).__init__()
-        self.max_length = max_length
-        self.embedding_layer = nn.Embedding(max_length, emb_size)
-
-    def forward(self, batch_size, seq_length, device):
-        assert (seq_length <= self.max_length)
-        ids = torch.arange(0, seq_length).long().to(torch.device(device))
-        ids = ids.unsqueeze(0).repeat(batch_size, 1)
-        emb = self.embedding_layer(ids)
-        return emb
-
-
-class MaskLinear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True):
-        super(MaskLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = nn.parameter.Parameter(torch.FloatTensor(in_features, out_features))
-        if bias:
-            self.bias = nn.parameter.Parameter(torch.FloatTensor(out_features))
-        else:
-            self.register_parameter('bias', None)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.weight.size(1))
-        self.weight.data.uniform_(-stdv, stdv)
-        if self.bias is not None:
-            self.bias.data.uniform_(-stdv, stdv)
-
-    def forward(self, input, mask):
-        weight = torch.mul(self.weight, mask)
-        output = torch.mm(input, weight)
-
-        if self.bias is not None:
-            return output + self.bias
-        else:
-            return output
-
-    def __repr__(self):
-        return self.__class__.__name__ + ' (' \
-               + str(self.in_features) + ' -> ' \
-               + str(self.out_features) + ')'
-
-
-class GCN(nn.Module):
-    def __init__(self, voc_size, emb_dim, ehr_adj, ddi_adj, device=torch.device('cpu:0')):
-        super(GCN, self).__init__()
-        self.voc_size = voc_size
-        self.emb_dim = emb_dim
-        self.device = device
-
-        ehr_adj = self.normalize(ehr_adj + np.eye(ehr_adj.shape[0]))
-        ddi_adj = self.normalize(ddi_adj + np.eye(ddi_adj.shape[0]))
-
-        self.ehr_adj = torch.FloatTensor(ehr_adj).to(device)
-        self.ddi_adj = torch.FloatTensor(ddi_adj).to(device)
-        self.x = torch.eye(voc_size).to(device)
-
-        self.gcn1 = GraphConvolution(voc_size, emb_dim)
-        self.dropout = nn.Dropout(p=0.3)
-        self.gcn2 = GraphConvolution(emb_dim, emb_dim)
-        self.gcn3 = GraphConvolution(emb_dim, emb_dim)
-
-    def forward(self):
-        ehr_node_embedding = self.gcn1(self.x, self.ehr_adj)
-        ddi_node_embedding = self.gcn1(self.x, self.ddi_adj)
-
-        ehr_node_embedding = F.relu(ehr_node_embedding)
-        ddi_node_embedding = F.relu(ddi_node_embedding)
-        ehr_node_embedding = self.dropout(ehr_node_embedding)
-        ddi_node_embedding = self.dropout(ddi_node_embedding)
-
-        ehr_node_embedding = self.gcn2(ehr_node_embedding, self.ehr_adj)
-        ddi_node_embedding = self.gcn3(ddi_node_embedding, self.ddi_adj)
-        return ehr_node_embedding, ddi_node_embedding
-
-    def normalize(self, mx):
-        """Row-normalize sparse matrix"""
-        rowsum = np.array(mx.sum(1))
-        r_inv = np.power(rowsum, -1).flatten()
-        r_inv[np.isinf(r_inv)] = 0.
-        r_mat_inv = np.diagflat(r_inv)
-        mx = r_mat_inv.dot(mx)
-        return mx
-
-
-class policy_network(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden_dim):
-        super(policy_network, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, out_dim)
-        )
-
-    def forward(self, x):
-        return self.layers(x)

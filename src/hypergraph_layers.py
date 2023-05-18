@@ -13,7 +13,6 @@ import torch.nn.functional as F
 from torch_geometric.nn import HypergraphConv, GATv2Conv, GCNConv
 import torch.sparse as tsp
 
-from hyperbolic_encoders import HGCF
 
 import gc
 
@@ -87,16 +86,10 @@ class HyperGraphEmbed(nn.Module):
         self.H = H
         self.A = A
         self.ddi_A = ddi_A
+
         self.hgat = HGAT(embedding_dim, n_layers, p)
         self.gat = GAT(embedding_dim, n_layers, p, edge_dim=1)
         self.ddi_gat = GAT(embedding_dim, n_layers, p)
-
-        self.hyperbolic_encoders = HGCF(
-            c=-1,
-            n_layers=2,
-            embed_dim=embedding_dim,
-            network='resSumGCN'
-        )
 
     def get_hyperedge_representation(self, embed):
         # 获取超边的表示，通过聚合当前超边下所有item的embedding

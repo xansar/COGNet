@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 import dill
 import time
-from torch.optim import Adam
+from hybo_modules.optim import RiemannianAdam, RiemannianSGD
 from torch.utils import data
 import os
 import torch.nn.functional as F
@@ -13,25 +13,23 @@ import random
 from collections import defaultdict
 import wandb
 
-
 from torch.utils.data.dataloader import DataLoader
 from data_loader import mimic_data, pad_batch_v2_train, pad_batch_v2_eval, pad_num_replace
 
 import sys
 
 sys.path.append("..")
-from HyperCOGNet_model import HyperCOGNet, policy_network
+from hybo_modules import HyboCOGNet
 from hypergraph_construction import construct_graphs
-from util import llprint, sequence_metric, sequence_output_process, ddi_rate_score, get_n_params, output_flatten, \
-    print_result
+from util import llprint, ddi_rate_score, get_n_params, output_flatten
 from recommend import eval, test
 
 torch.manual_seed(1203)
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
 
-model_name = 'HyperCOGNet'
-resume_path = './saved/HyperCOGNet/Epoch_43_JA_0.5047_DDI_0.0863.model'
+model_name = 'HyboCOGNet'
+resume_path = f'./saved/{model_name}/Epoch_43_JA_0.5047_DDI_0.0863.model'
 
 # Training settings
 parser = argparse.ArgumentParser()
@@ -56,12 +54,14 @@ args = parser.parse_args()
 if args.ddp:
     dist.init_process_group(backend='nccl')
 
+
 def init_wandb(args):
     # start a new wandb run to track this script
     wandb.init(
         # set the wandb project where this run will be logged
         project="MLHC",
         group=args.model_name,
+
         # track hyperparameters and run metadata
         config={
             "learning_rate": args.lr,
@@ -81,7 +81,9 @@ def init_wandb(args):
         dir='./saved'
     )
 
-def log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model, eval_dataloader, voc_size, epoch, device, TOKENS, args, tic, history, best_ja, best_epoch):
+
+def log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model, eval_dataloader, voc_size, epoch, device, TOKENS,
+                 args, tic, history, best_ja, best_epoch):
     print(
         f'\nLoss: {np.mean(total_loss_lst):.4f}\tPred Loss: {np.mean(pred_loss_lst):.4f}\tCon Loss: {np.mean(con_loss_lst):.4f}')
     tic2 = time.time()
@@ -100,7 +102,6 @@ def log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model, eval_datalo
     history['total_loss'].append(np.mean(total_loss_lst))
     history['pred_loss'].append(np.mean(pred_loss_lst))
     history['con_loss'].append(np.mean(con_loss_lst))
-
 
     wandb.log({
         'ja': ja,
@@ -127,9 +128,9 @@ def log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model, eval_datalo
             np.mean(history['con_loss'][-5:])
         ))
     torch.save(model.state_dict(), open(os.path.join('saved', args.model_name, \
-                                                            'Epoch_{}_JA_{:.4}_DDI_{:.4}.model'.format(epoch, ja,
-                                                                                                       ddi_rate)),
-                                               'wb'))
+                                                     'Epoch_{}_JA_{:.4}_DDI_{:.4}.model'.format(epoch, ja,
+                                                                                                ddi_rate)),
+                                        'wb'))
 
     if best_ja < ja:
         best_epoch = epoch
@@ -140,6 +141,7 @@ def log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model, eval_datalo
 
     dill.dump(history, open(os.path.join('saved', args.model_name, 'history_{}.pkl'.format(args.model_name)), 'wb'))
     return best_ja, best_epoch
+
 
 def main(args):
     # load data
@@ -196,7 +198,7 @@ def main(args):
     )
 
     if args.debug:
-        print('='*20 + 'DEBUG' + '='*20)
+        print('=' * 20 + 'DEBUG' + '=' * 20)
         data_train = data_train[:100]
         data_eval = data_eval[:10]
     train_dataset = mimic_data(data_train)
@@ -206,8 +208,8 @@ def main(args):
     if args.ddp:
         local_rank = int(os.environ["LOCAL_RANK"])
         device = torch.device(f'cuda:{local_rank}')
-        model = HyperCOGNet(voc_size, ehr_adj, ddi_adj, ddi_mask_H, H, A, emb_dim=args.emb_dim, n_layers=args.n_layers,
-                            device=device)
+        model = HyboCOGNet(voc_size, ehr_adj, ddi_adj, ddi_mask_H, H, A, emb_dim=args.emb_dim, n_layers=args.n_layers,
+                           device=device)
 
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
 
@@ -223,7 +225,7 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model,
                                                           device_ids=[local_rank],
                                                           output_device=local_rank,
-                                                          find_unused_parameters=False,
+                                                          find_unused_parameters=True,
                                                           broadcast_buffers=False)
         model.to(device=device)
         if dist.get_rank() == 0:
@@ -249,8 +251,8 @@ def main(args):
             init_wandb(args)
 
         device = torch.device(f'cuda:{1}')
-        model = HyperCOGNet(voc_size, ehr_adj, ddi_adj, ddi_mask_H, H, A, emb_dim=args.emb_dim, n_layers=args.n_layers,
-                            device=device)
+        model = HyboCOGNet(voc_size, ehr_adj, ddi_adj, ddi_mask_H, H, A, emb_dim=args.emb_dim, n_layers=args.n_layers,
+                           device=device)
         model.to(device=device)
         print('parameters', get_n_params(model))
 
@@ -260,7 +262,6 @@ def main(args):
                                      pin_memory=True)
         test_dataloader = DataLoader(test_dataset, batch_size=1, collate_fn=pad_batch_v2_eval, shuffle=False,
                                      pin_memory=True)
-
 
     if args.Test:
         model.load_state_dict(torch.load(open(args.resume_path, 'rb')))
@@ -300,8 +301,7 @@ def main(args):
         print('test time: {}'.format(time.time() - tic))
         return
 
-
-    optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.lamda)
+    optimizer = RiemannianAdam(model.parameters(), lr=args.lr, weight_decay=args.lamda, stabilize=10)
 
     history = defaultdict(list)
     best_epoch, best_ja = 0, 0
@@ -314,7 +314,6 @@ def main(args):
         if args.ddp:
             if dist.get_rank() == 0:
                 train_sampler.set_epoch(epoch)
-
 
         tic = time.time()
         if args.ddp:
@@ -349,15 +348,20 @@ def main(args):
             stay_disease_mask = stay_disease_mask.to(device)
             dec_proc_mask = dec_proc_mask.to(device)
             stay_proc_mask = stay_proc_mask.to(device)
-            output_logits, con_loss = model(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
-                                  seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask,
-                                  dec_proc, stay_proc, dec_proc_mask, stay_proc_mask)
+            # media_output = model(diseases, procedures, medications, d_mask_matrix, p_mask_matrix,
+                                            # m_mask_matrix,
+                                            # seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask,
+                                            # dec_proc, stay_proc, dec_proc_mask, stay_proc_mask)
+            output_logits, con_loss = model(diseases, procedures, medications, d_mask_matrix, p_mask_matrix,
+                                            m_mask_matrix,
+                                            seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask,
+                                            dec_proc, stay_proc, dec_proc_mask, stay_proc_mask)
             labels, predictions = output_flatten(medications, output_logits, seq_length, m_length_matrix,
                                                  voc_size[2] + 2, END_TOKEN, device, max_len=args.max_len)
             pred_loss = F.nll_loss(predictions, labels.long())
 
-            loss = pred_loss + args.beta * con_loss
-            # loss = pred_loss
+            loss = pred_loss
+            # loss = pred_loss + args.beta * con_loss
 
             loss.backward()
             optimizer.step()
@@ -368,8 +372,9 @@ def main(args):
 
         if args.ddp:
             if dist.get_rank() == 0:
-                best_epoch, best_ja = log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model.module, eval_dataloader, voc_size, epoch,
-                             device, TOKENS, args, tic, history, best_ja, best_epoch)
+                best_epoch, best_ja = log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model.module,
+                                                   eval_dataloader, voc_size, epoch,
+                                                   device, TOKENS, args, tic, history, best_ja, best_epoch)
         else:
             best_epoch, best_ja = log_and_eval(total_loss_lst, pred_loss_lst, con_loss_lst, model,
                                                eval_dataloader, voc_size, epoch,
@@ -380,5 +385,7 @@ def main(args):
             wandb.finish()
     else:
         wandb.finish()
+
+
 if __name__ == '__main__':
     main(args)

@@ -17,6 +17,7 @@ from collections import defaultdict
 
 from torch.utils.data.dataloader import DataLoader
 from data_loader import mimic_data, pad_batch_v2_train, pad_batch_v2_eval, pad_num_replace
+import wandb
 
 import sys
 
@@ -51,7 +52,34 @@ parser.add_argument('--beam_size', type=int, default=4, help='max num of sentenc
 
 args = parser.parse_args()
 
+def init_wandb(args):
+    # start a new wandb run to track this script
+    wandb.init(
+        # set the wandb project where this run will be logged
+        project="MLHC",
+        group=args.model_name,
+
+        # track hyperparameters and run metadata
+        config={
+            "learning_rate": args.lr,
+            "weight_decay": 0.,
+            "architecture": args.model_name,
+            "dataset": "MIMIC-III",
+            "epochs": 50,
+            "beta": 0.,
+            "batch_size": args.batch_size,
+            "emb_dim": args.emb_dim,
+            "seed": 1203
+        },
+
+        name=f'{args.model_name}_lr_{args.lr}',
+
+        # dir
+        dir='./saved'
+    )
+
 def main(args):
+    init_wandb(args)
     # load data
     data_path = '../data/records_final.pkl'
     voc_path = '../data/voc_final.pkl'
@@ -60,7 +88,7 @@ def main(args):
     ehr_adj_path = '../data/ehr_adj_final.pkl'
     ddi_adj_path = '../data/ddi_A_final.pkl'
     ddi_mask_path = '../data/ddi_mask_H.pkl'
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:1')
 
     data = dill.load(open(data_path, 'rb'))
     voc = dill.load(open(voc_path, 'rb'))
@@ -210,7 +238,18 @@ def main(args):
         history['prauc'].append(prauc)
         history['med'].append(avg_med)
         history['train_loss'].append(np.mean(pred_loss_lst))
-
+        wandb.log({
+            'ja': ja,
+            'ddi_rate': ddi_rate,
+            'avg_p': avg_p,
+            'avg_r': avg_r,
+            'avg_f1': avg_f1,
+            'prauc': prauc,
+            'med': avg_med,
+            'total_loss': np.mean(pred_loss_lst),
+            'pred_loss': np.mean(pred_loss_lst),
+            'con_loss': 0.
+        })
         if epoch >= 5:
             print('ddi: {}, Med: {}, Ja: {}, F1: {}'.format(
                 np.mean(history['ddi_rate'][-5:]),
@@ -231,7 +270,7 @@ def main(args):
         print('best_epoch: {}'.format(best_epoch))
 
         dill.dump(history, open(os.path.join('saved', args.model_name, 'history_{}.pkl'.format(args.model_name)), 'wb'))
-
+    wandb.finish()
 
 if __name__ == '__main__':
     main(args)

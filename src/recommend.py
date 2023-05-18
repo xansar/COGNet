@@ -75,7 +75,7 @@ def eval_recommend_batch(model, batch_data, device, TOKENS, args):
 
     batch_size = medications.size(0)
     max_visit_num = medications.size(1)
-    if model.name == 'HyperCOGNet':
+    if model.name == 'HyperCOGNet' or model.name == 'HyboCOGNet':
         input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory, con_loss = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
             seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
     else:
@@ -127,7 +127,7 @@ def test_recommend_batch(model, batch_data, device, TOKENS, ddi_adj, args):
 
     batch_size = medications.size(0)
     visit_num = medications.size(1)
-    if model.name == 'HyperCOGNet':
+    if model.name == 'HyperCOGNet' or model.name == 'HyboCOGNet':
         input_disease_embdding, input_proc_embedding, encoded_medication, cross_visit_scores, last_seq_medication, last_m_mask, drug_memory, con_loss = model.encode(diseases, procedures, medications, d_mask_matrix, p_mask_matrix, m_mask_matrix,
             seq_length, dec_disease, stay_disease, dec_disease_mask, stay_disease_mask, dec_proc, stay_proc, dec_proc_mask, stay_proc_mask, max_len=20)
     else:

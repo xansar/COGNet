@@ -21,6 +21,10 @@ from hypergraph_construction import construct_graphs
 def hypergraph_analyse(H):
 
     # H_2 = tsp.mm(H, H.T)  两层卷积后，矩阵稠密程度大概有90%
+    H_1 = tsp.mm(H, H.T)
+    print(f'H_1 density: {H_1.nnp / 1}')
+    H_2 = tsp.mm(H, tsp.mm(H.T, H_1))
+
     H = H.to_dense().int()
     # 统计节点度数
     node_degrees = torch.sum(H, dim=1)
